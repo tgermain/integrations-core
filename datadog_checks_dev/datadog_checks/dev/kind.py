@@ -2,13 +2,14 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import os
+import shutil
 from contextlib import contextmanager
 
 import pytest
 from six import PY3
 
-from .env import environment_run
-from .structures import LazyFunction
+from .env import environment_run, get_state, save_state
+from .structures import EnvVars, LazyFunction
 from .subprocess import run_command
 from .utils import find_check_root, get_check_name, get_here, get_tox_env, path_join
 
@@ -64,20 +65,27 @@ class KindUp(LazyFunction):
     def __init__(self, directory):
         self.directory = directory
         self.check_root = find_check_root(depth=3)
-        self.check_name = get_check_name(self.directory)
+        self.check_name = get_check_name(self.check_root)
         self.cluster_name = '{}-{}-cluster'.format(self.check_name, get_tox_env())
 
     def __call__(self):
-        kube_path = path_join(self.check_root, '.kube', 'config')
-        env = os.environ.copy()
-        env['KUBECONFIG'] = kube_path
-        # Create cluster
-        run_command(['kind', 'create', 'cluster', '--name', self.cluster_name], check=True, env=env)
-        # os.move(kube_path -> tempdir)
-        # Connect to cluster
-        run_command(['kind', 'export', 'kubeconfig', '--name', self.cluster_name], check=True, env=env)
+        # Generated kubeconfig
+        kube_path = path_join(self.check_root, '.kube')
 
-        return kube_path
+        with EnvVars({'KUBECONFIG': path_join(kube_path, 'config')}):
+            # Create cluster
+            run_command(['kind', 'create', 'cluster', '--name', self.cluster_name], check=True)
+            # Connect to cluster
+            run_command(['kind', 'export', 'kubeconfig', '--name', self.cluster_name], check=True)
+
+        # Move .kube/ to temp directory
+        dst = shutil.move(kube_path, self.directory)
+
+        # Temp kubeconfig
+        tmp_path = path_join(dst, 'config')
+        save_state('kubeconfig_path', tmp_path)
+
+        return tmp_path
 
 
 class KindDown(LazyFunction):
@@ -85,8 +93,12 @@ class KindDown(LazyFunction):
 
     def __init__(self, directory):
         self.directory = directory
-        self.check_name = get_check_name(self.directory)
+        self.check_root = find_check_root(depth=3)
+        self.check_name = get_check_name(self.check_root)
         self.cluster_name = '{}-{}-cluster'.format(self.check_name, get_tox_env())
 
     def __call__(self):
-        return run_command(['kind', 'delete', 'cluster', '--name', self.cluster_name], check=True)
+        kubeconfig_path = get_state('kubeconfig_path')
+
+        with EnvVars({'KUBECONFIG': kubeconfig_path}):
+            return run_command(['kind', 'delete', 'cluster', '--name', self.cluster_name], check=True)
